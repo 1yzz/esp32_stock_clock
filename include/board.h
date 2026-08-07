@@ -21,6 +21,15 @@
 #define POLL_WEATHER_MS      (10UL * 60UL * 1000UL) /* 天气 10 分钟 */
 #define POLL_STOCK_QUOTE_MS  (15UL * 1000UL)        /* 当前标的 15 秒 */
 #define POLL_STOCK_LIST_MS   (3UL * 60UL * 1000UL)  /* 全列表 3 分钟（非行情页） */
-#define POLL_KLINE_MS        (5UL * 60UL * 1000UL)  /* 日 K 5 分钟 */
+/* K 线 TTL 默认值（毫秒）；实际以 NVS/网页配置为准 */
+#define POLL_KLINE_MS        (60UL * 1000UL)         /* 当日 5 分默认 60s */
+#define POLL_KLINE_MID_MS    (10UL * 60UL * 1000UL)  /* 3天/7天默认 10min */
+#define POLL_KLINE_DAY_MS    (30UL * 60UL * 1000UL)  /* 30天/完整默认 30min */
 #define HTTP_MIN_GAP_MS      1000UL                 /* 任意请求最小间隔 */
 #define HTTP_BACKOFF_MAX_MS  (10UL * 60UL * 1000UL) /* 被限流后最长退避 */
+
+/* 功耗：背光 0–255；CPU MHz（80/160/240） */
+#define DISPLAY_BRIGHTNESS   90
+#define APP_CPU_MHZ          160
+#define LOOP_IDLE_DELAY_MS   50
+#define CLOCK_TICK_MS        1000UL

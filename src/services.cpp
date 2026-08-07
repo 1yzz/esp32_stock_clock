@@ -17,10 +17,122 @@ static String s_geoCity;
 static uint32_t s_geoAtMs = 0;
 static constexpr uint32_t GEO_CACHE_MS = 6UL * 60UL * 60UL * 1000UL; /* 6h */
 
-static KlineBar s_klines[KLINE_MAX_BARS];
-static uint8_t s_klineCount = 0;
-static String s_klineSymbol;
-static uint32_t s_klineAtMs = 0;
+/*
+ * 各周期独立缓存与请求（无本地切片）：
+ *   当日 → 5 分钟
+ *   3 天 → 30 分钟
+ *   7 天 → 60 分钟
+ *   30 天 / 完整 → 日 K（各自一份，lmt 不同）
+ */
+struct KlineStore {
+    String symbol;
+    KlineBar bars[KLINE_MAX_BARS];
+    uint8_t count = 0;
+    uint32_t atMs = 0;
+};
+
+struct KlineRangeSpec {
+    KlineStore *store;
+    const char *klt;
+    const char *tqKey;
+    bool preferToday;
+    uint32_t ttlMs;
+    uint8_t fetchLimit; /* 直接按此数量向接口要，展示全部 */
+};
+
+static KlineStore s_m5Store;
+static KlineStore s_m30Store;
+static KlineStore s_m60Store;
+static KlineStore s_day30Store;
+static KlineStore s_dayFullStore;
+static KlineBar s_viewBars[KLINE_MAX_BARS];
+static uint8_t s_viewCount = 0;
+static String s_viewSymbol;
+static KlineRange s_viewRange = KRANGE_TODAY_5M;
+static uint32_t s_viewAtMs = 0;
+
+/* 可由网页配置覆盖，默认取 board.h */
+static uint32_t s_ttlTodayMs = POLL_KLINE_MS;
+static uint32_t s_ttlMidMs = POLL_KLINE_MID_MS;
+static uint32_t s_ttlDayMs = POLL_KLINE_DAY_MS;
+
+void stockKlineSetTtlMs(uint32_t todayMs, uint32_t midMs, uint32_t dayMs)
+{
+    if (todayMs < 15000UL) {
+        todayMs = 15000UL;
+    }
+    if (midMs < 60000UL) {
+        midMs = 60000UL;
+    }
+    if (dayMs < 60000UL) {
+        dayMs = 60000UL;
+    }
+    s_ttlTodayMs = todayMs;
+    s_ttlMidMs = midMs;
+    s_ttlDayMs = dayMs;
+    Serial.printf("[kline] ttl today=%lus mid=%lus day=%lus\n", (unsigned long)(s_ttlTodayMs / 1000UL),
+                  (unsigned long)(s_ttlMidMs / 1000UL), (unsigned long)(s_ttlDayMs / 1000UL));
+}
+
+const char *klineRangeLabel(KlineRange range)
+{
+    switch (range) {
+    case KRANGE_TODAY_5M:
+        return "当日5分";
+    case KRANGE_DAY_3:
+        return "3天30分";
+    case KRANGE_DAY_7:
+        return "7天60分";
+    case KRANGE_DAY_30:
+        return "30天K";
+    case KRANGE_DAY_FULL:
+        return "完整K";
+    default:
+        return "K线";
+    }
+}
+
+static KlineRangeSpec klineSpec(KlineRange range)
+{
+    switch (range) {
+    case KRANGE_TODAY_5M:
+        return {&s_m5Store, "5", "m5", true, s_ttlTodayMs, KLINE_MAX_BARS};
+    case KRANGE_DAY_3:
+        return {&s_m30Store, "30", "m30", false, s_ttlMidMs, KLINE_MAX_BARS};
+    case KRANGE_DAY_7:
+        return {&s_m60Store, "60", "m60", false, s_ttlMidMs, KLINE_MAX_BARS};
+    case KRANGE_DAY_30:
+        return {&s_day30Store, "101", "day", false, s_ttlDayMs, 30};
+    case KRANGE_DAY_FULL:
+    default:
+        return {&s_dayFullStore, "101", "day", false, s_ttlDayMs, KLINE_MAX_BARS};
+    }
+}
+
+static uint32_t storeAgeMs(const KlineStore &st)
+{
+    if (st.count == 0 || st.atMs == 0) {
+        return UINT32_MAX;
+    }
+    return millis() - st.atMs;
+}
+
+static bool storeFresh(const KlineStore &st, const String &symbol, uint32_t ttlMs)
+{
+    return st.symbol == symbol && st.count > 0 && storeAgeMs(st) < ttlMs;
+}
+
+/* 整份展示，不做尾部截取 */
+static void publishStore(const KlineStore &st, KlineRange range)
+{
+    s_viewSymbol = st.symbol;
+    s_viewRange = range;
+    s_viewAtMs = st.atMs;
+    s_viewCount = st.count;
+    if (st.count > 0) {
+        memcpy(s_viewBars, st.bars, st.count * sizeof(KlineBar));
+    }
+}
 
 void timeServiceInit()
 {
@@ -278,6 +390,14 @@ static String stockBareCode(const String &symbol)
     return s;
 }
 
+/* 上交所 / 深交所 A 股（含指数） */
+static bool isAshareSymbol(const String &symbol)
+{
+    String bare = stockBareCode(symbol);
+    bare.toLowerCase();
+    return bare.startsWith("sh") || bare.startsWith("sz");
+}
+
 static bool isCnListedSymbol(const String &symbol)
 {
     String bare = stockBareCode(symbol);
@@ -516,8 +636,22 @@ bool stockRefreshSymbol(const String &symbol, StockQuote &out, bool enrich)
     }
     out.symbol = symbol;
 
-    if (isCnListedSymbol(symbol)) {
-        /* A/港股：绝不直接用腾讯名（易乱码/缺字）；只信东财 UTF-8 */
+    if (isAshareSymbol(symbol)) {
+        /* A股：腾讯名 GBK→UTF-8 可直接显示；东财 UTF-8 优先覆盖 */
+        String tencentName = out.name;
+        if (!nameHasUtf8Chinese(tencentName)) {
+            out.name = "";
+        }
+        if (enrich) {
+            String cn;
+            if (fetchEastmoneyCnName(symbol, cn)) {
+                out.name = cn;
+            } else if (nameHasUtf8Chinese(tencentName)) {
+                out.name = tencentName;
+            }
+        }
+    } else if (isCnListedSymbol(symbol)) {
+        /* 港股：仍以东财 UTF-8 为主 */
         String tencentName = out.name;
         out.name = "";
         if (enrich) {
@@ -525,7 +659,7 @@ bool stockRefreshSymbol(const String &symbol, StockQuote &out, bool enrich)
             if (fetchEastmoneyCnName(symbol, cn)) {
                 out.name = cn;
             } else if (nameHasUtf8Chinese(tencentName)) {
-                out.name = tencentName; /* 东财失败才回退 */
+                out.name = tencentName;
             }
         }
     } else if (enrich) {
@@ -549,12 +683,31 @@ bool stockRefreshIndex(const AppConfig &cfg, uint8_t index, bool enrich)
         return false;
     }
 
-    if (isCnListedSymbol(cfg.stocks[index])) {
+    if (isAshareSymbol(cfg.stocks[index])) {
+        /* A股：已有中文名则保留；否则用本次腾讯转码名，再尝试东财升级 */
         if (nameHasUtf8Chinese(keptName)) {
-            q.name = keptName; /* 轻刷新保留已成功的东财中文名 */
+            q.name = keptName;
+        } else if (!nameHasUtf8Chinese(q.name)) {
+            q.name = "";
+        }
+        if (!nameHasUtf8Chinese(q.name) || enrich) {
+            if ((int32_t)(millis() - s_cnNameNextTryMs[index]) >= 0) {
+                String cn;
+                if (fetchEastmoneyCnName(cfg.stocks[index], cn)) {
+                    q.name = cn;
+                    s_cnNameNextTryMs[index] = 0;
+                } else if (!nameHasUtf8Chinese(q.name)) {
+                    s_cnNameNextTryMs[index] = millis() + 120UL * 1000UL;
+                } else {
+                    s_cnNameNextTryMs[index] = 0;
+                }
+            }
+        }
+    } else if (isCnListedSymbol(cfg.stocks[index])) {
+        if (nameHasUtf8Chinese(keptName)) {
+            q.name = keptName;
             s_cnNameNextTryMs[index] = 0;
         } else if (nameHasUtf8Chinese(q.name)) {
-            /* enrich 刚拉到的东财名 */
             s_cnNameNextTryMs[index] = 0;
         } else if ((int32_t)(millis() - s_cnNameNextTryMs[index]) >= 0) {
             String cn;
@@ -562,8 +715,8 @@ bool stockRefreshIndex(const AppConfig &cfg, uint8_t index, bool enrich)
                 q.name = cn;
                 s_cnNameNextTryMs[index] = 0;
             } else {
-                q.name = ""; /* 只显示代码，避免未知方块字 */
-                s_cnNameNextTryMs[index] = millis() + 120UL * 1000UL; /* 失败 2 分钟后再试 */
+                q.name = "";
+                s_cnNameNextTryMs[index] = millis() + 120UL * 1000UL;
             }
         } else {
             q.name = "";
@@ -623,8 +776,14 @@ bool stockRefreshAll(const AppConfig &cfg)
             if (line.indexOf(cfg.stocks[i]) >= 0 || line.indexOf(stockBareCode(cfg.stocks[i])) >= 0) {
                 if (parseSimpleQuoteLine(line, s_quotes[i])) {
                     s_quotes[i].symbol = cfg.stocks[i];
-                    if (isCnListedSymbol(cfg.stocks[i])) {
-                        /* 批量刷新：只保留缓存东财名，丢弃腾讯名 */
+                    if (isAshareSymbol(cfg.stocks[i])) {
+                        /* A股：优先缓存名，否则保留本次腾讯转码中文名 */
+                        if (nameHasUtf8Chinese(keptName[i])) {
+                            s_quotes[i].name = keptName[i];
+                        } else if (!nameHasUtf8Chinese(s_quotes[i].name)) {
+                            s_quotes[i].name = "";
+                        }
+                    } else if (isCnListedSymbol(cfg.stocks[i])) {
                         if (nameHasUtf8Chinese(keptName[i])) {
                             s_quotes[i].name = keptName[i];
                         } else {
@@ -686,9 +845,23 @@ static bool stockToSecid(const String &symbol, String &secid)
     return false;
 }
 
-static bool parseEastmoneyKlines(const String &payload)
+/* 本地日历日 YYYY-MM-DD；未对时则空串（不过滤） */
+static String localDateYmd()
 {
-    s_klineCount = 0;
+    time_t now = time(nullptr);
+    if (now < 1700000000) {
+        return String();
+    }
+    struct tm info;
+    localtime_r(&now, &info);
+    char buf[12];
+    strftime(buf, sizeof(buf), "%Y-%m-%d", &info);
+    return String(buf);
+}
+
+static bool parseEastmoneyKlinesTo(const String &payload, bool preferToday, KlineStore &dst)
+{
+    dst.count = 0;
     int arr = payload.indexOf("\"klines\":[");
     if (arr < 0) {
         return false;
@@ -699,10 +872,12 @@ static bool parseEastmoneyKlines(const String &payload)
         return false;
     }
 
-    /* 先扫到末尾再只保留最后 KLINE_MAX_BARS 根：流式收集环形 */
+    String today = preferToday ? localDateYmd() : String();
     KlineBar tmp[KLINE_MAX_BARS];
     uint8_t n = 0;
     uint8_t head = 0;
+    bool onToday = false;
+
     int p = arr;
     while (p < end) {
         int q1 = payload.indexOf('"', p);
@@ -714,23 +889,27 @@ static bool parseEastmoneyKlines(const String &payload)
             break;
         }
         String row = payload.substring(q1 + 1, q2);
-        /* date,open,close,high,low,volume */
-        float o = 0, c = 0, h = 0, l = 0;
         int f0 = row.indexOf(',');
         int f1 = row.indexOf(',', f0 + 1);
         int f2 = row.indexOf(',', f1 + 1);
         int f3 = row.indexOf(',', f2 + 1);
         int f4 = row.indexOf(',', f3 + 1);
         if (f0 > 0 && f1 > f0 && f2 > f1 && f3 > f2) {
-            o = row.substring(f0 + 1, f1).toFloat();
-            c = row.substring(f1 + 1, f2).toFloat();
-            h = row.substring(f2 + 1, f3).toFloat();
-            l = (f4 > f3) ? row.substring(f3 + 1, f4).toFloat() : row.substring(f3 + 1).toFloat();
+            bool isToday = today.length() && row.startsWith(today);
+            if (isToday && !onToday) {
+                n = 0;
+                head = 0;
+                onToday = true;
+            } else if (onToday && !isToday) {
+                p = q2 + 1;
+                continue;
+            }
+
             KlineBar b;
-            b.open = o;
-            b.close = c;
-            b.high = h;
-            b.low = l;
+            b.open = row.substring(f0 + 1, f1).toFloat();
+            b.close = row.substring(f1 + 1, f2).toFloat();
+            b.high = row.substring(f2 + 1, f3).toFloat();
+            b.low = (f4 > f3) ? row.substring(f3 + 1, f4).toFloat() : row.substring(f3 + 1).toFloat();
             if (n < KLINE_MAX_BARS) {
                 tmp[n++] = b;
             } else {
@@ -745,122 +924,203 @@ static bool parseEastmoneyKlines(const String &payload)
         return false;
     }
     if (n < KLINE_MAX_BARS) {
-        memcpy(s_klines, tmp, n * sizeof(KlineBar));
-        s_klineCount = n;
+        memcpy(dst.bars, tmp, n * sizeof(KlineBar));
+        dst.count = n;
     } else {
         for (uint8_t i = 0; i < KLINE_MAX_BARS; ++i) {
-            s_klines[i] = tmp[(head + i) % KLINE_MAX_BARS];
+            dst.bars[i] = tmp[(head + i) % KLINE_MAX_BARS];
         }
-        s_klineCount = KLINE_MAX_BARS;
+        dst.count = KLINE_MAX_BARS;
     }
     return true;
 }
 
-uint32_t stockKlineAgeMs()
+static bool parseTencentKlinesTo(const String &payload, const char *key, KlineStore &dst)
 {
-    if (s_klineCount == 0 || s_klineAtMs == 0) {
-        return UINT32_MAX;
+    dst.count = 0;
+    String marker = String("\"") + key + "\":[";
+    int day = payload.indexOf(marker);
+    if (day < 0) {
+        return false;
     }
-    return millis() - s_klineAtMs;
+    int p = day + marker.length();
+    while (dst.count < KLINE_MAX_BARS) {
+        int a = payload.indexOf('[', p);
+        if (a < 0) {
+            break;
+        }
+        int b = payload.indexOf(']', a);
+        if (b < 0) {
+            break;
+        }
+        String row = payload.substring(a + 1, b);
+        String vals[6];
+        int vi = 0, rs = 0;
+        while (vi < 6) {
+            int q1 = row.indexOf('"', rs);
+            if (q1 < 0) {
+                break;
+            }
+            int q2 = row.indexOf('"', q1 + 1);
+            if (q2 < 0) {
+                break;
+            }
+            vals[vi++] = row.substring(q1 + 1, q2);
+            rs = q2 + 1;
+        }
+        if (vi < 5) {
+            int c0 = row.indexOf(',');
+            if (c0 > 0) {
+                vals[0] = row.substring(0, c0);
+                vals[0].replace("\"", "");
+                int start = c0 + 1;
+                vi = 1;
+                while (vi < 6 && start < (int)row.length()) {
+                    int c = row.indexOf(',', start);
+                    String part = (c < 0) ? row.substring(start) : row.substring(start, c);
+                    part.trim();
+                    part.replace("\"", "");
+                    vals[vi++] = part;
+                    if (c < 0) {
+                        break;
+                    }
+                    start = c + 1;
+                }
+            }
+        }
+        if (vi >= 5) {
+            dst.bars[dst.count].open = vals[1].toFloat();
+            dst.bars[dst.count].close = vals[2].toFloat();
+            dst.bars[dst.count].high = vals[3].toFloat();
+            dst.bars[dst.count].low = vals[4].toFloat();
+            dst.count++;
+        }
+        p = b + 1;
+        if (p < (int)payload.length() && payload[p] == ']') {
+            break;
+        }
+    }
+    return dst.count > 0;
 }
 
-uint8_t stockKlineRefresh(const String &symbol, bool force)
+static bool fetchKlineStore(const String &symbol, const KlineRangeSpec &spec, KlineStore &dst)
 {
-    if (!force && s_klineSymbol == symbol && s_klineCount > 0 && stockKlineAgeMs() < POLL_KLINE_MS) {
-        Serial.printf("[kline] cache hit %s age=%lu\n", symbol.c_str(), (unsigned long)stockKlineAgeMs());
-        return s_klineCount;
-    }
-
     String secid;
     if (!stockToSecid(symbol, secid)) {
-        s_klineCount = 0;
-        s_klineSymbol = symbol;
-        s_klineAtMs = 0;
-        return 0;
-    }
-    String url = String("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=") + secid +
-                 "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=1&end=20500101&lmt=" +
-                 String(KLINE_MAX_BARS);
-    String payload;
-    if (!httpGetText(url, payload, 12000)) {
-        /* A股回退腾讯日K */
-        String bare = stockBareCode(symbol);
-        url = String("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=") + bare + ",day,,," +
-              String(KLINE_MAX_BARS) + ",qfq";
-        if (!httpGetText(url, payload, 12000)) {
-            s_klineCount = 0;
-            s_klineSymbol = symbol;
-            s_klineAtMs = 0;
-            return 0;
-        }
-        /* 腾讯: ["date","open","close","high","low","vol"] */
-        s_klineCount = 0;
-        int day = payload.indexOf("\"day\":[");
-        if (day < 0) {
-            s_klineSymbol = symbol;
-            return 0;
-        }
-        int p = day + 7;
-        while (s_klineCount < KLINE_MAX_BARS) {
-            int a = payload.indexOf('[', p);
-            if (a < 0) {
-                break;
-            }
-            int b = payload.indexOf(']', a);
-            if (b < 0) {
-                break;
-            }
-            String row = payload.substring(a + 1, b);
-            /* "d","o","c","h","l","v" */
-            String vals[6];
-            int vi = 0, rs = 0;
-            while (vi < 6) {
-                int q1 = row.indexOf('"', rs);
-                if (q1 < 0) {
-                    break;
-                }
-                int q2 = row.indexOf('"', q1 + 1);
-                if (q2 < 0) {
-                    break;
-                }
-                vals[vi++] = row.substring(q1 + 1, q2);
-                rs = q2 + 1;
-            }
-            if (vi >= 5) {
-                s_klines[s_klineCount].open = vals[1].toFloat();
-                s_klines[s_klineCount].close = vals[2].toFloat();
-                s_klines[s_klineCount].high = vals[3].toFloat();
-                s_klines[s_klineCount].low = vals[4].toFloat();
-                s_klineCount++;
-            }
-            p = b + 1;
-            if (payload[p] == ']') {
-                break;
-            }
-        }
-        s_klineSymbol = symbol;
-        s_klineAtMs = millis();
-        return s_klineCount;
+        dst.count = 0;
+        dst.symbol = symbol;
+        dst.atMs = 0;
+        return false;
     }
 
-    parseEastmoneyKlines(payload);
-    s_klineSymbol = symbol;
-    s_klineAtMs = millis();
-    Serial.printf("[kline] %s bars=%u\n", symbol.c_str(), (unsigned)s_klineCount);
-    return s_klineCount;
+    uint8_t limit = spec.fetchLimit;
+    if (limit == 0 || limit > KLINE_MAX_BARS) {
+        limit = KLINE_MAX_BARS;
+    }
+
+    String url = String("http://push2his.eastmoney.com/api/qt/stock/kline/get?secid=") + secid +
+                 "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=" + spec.klt +
+                 "&fqt=1&end=20500101&lmt=" + String(limit);
+    String payload;
+    bool ok = httpGetText(url, payload, 12000);
+    if (!ok) {
+        url = String("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=") + secid +
+              "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=" + spec.klt +
+              "&fqt=1&end=20500101&lmt=" + String(limit);
+        ok = httpGetText(url, payload, 12000);
+    }
+
+    if (ok && parseEastmoneyKlinesTo(payload, spec.preferToday, dst)) {
+        dst.symbol = symbol;
+        dst.atMs = millis();
+        Serial.printf("[kline] em %s klt=%s lmt=%u bars=%u\n", symbol.c_str(), spec.klt, (unsigned)limit,
+                      (unsigned)dst.count);
+        return true;
+    }
+
+    String bare = stockBareCode(symbol);
+    bare.toLowerCase();
+    url = String("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=") + bare + "," + spec.tqKey +
+          ",,," + String(limit) + ",qfq";
+    payload = "";
+    if (!httpGetText(url, payload, 12000) || !parseTencentKlinesTo(payload, spec.tqKey, dst)) {
+        dst.count = 0;
+        dst.symbol = symbol;
+        dst.atMs = 0;
+        Serial.printf("[kline] fail %s %s\n", symbol.c_str(), spec.tqKey);
+        return false;
+    }
+    dst.symbol = symbol;
+    dst.atMs = millis();
+    Serial.printf("[kline] tq %s %s bars=%u\n", symbol.c_str(), spec.tqKey, (unsigned)dst.count);
+    return true;
+}
+
+bool stockKlineNeedsFetch(const String &symbol, KlineRange range)
+{
+    if (range >= KRANGE_COUNT) {
+        range = KRANGE_TODAY_5M;
+    }
+    KlineRangeSpec spec = klineSpec(range);
+    return !storeFresh(*spec.store, symbol, spec.ttlMs);
+}
+
+uint32_t stockKlineAgeMs()
+{
+    if (s_viewCount == 0 || s_viewAtMs == 0) {
+        return UINT32_MAX;
+    }
+    return millis() - s_viewAtMs;
+}
+
+uint8_t stockKlineRefresh(const String &symbol, KlineRange range, bool force)
+{
+    if (range >= KRANGE_COUNT) {
+        range = KRANGE_TODAY_5M;
+    }
+
+    KlineRangeSpec spec = klineSpec(range);
+    KlineStore &store = *spec.store;
+
+    if (!force && storeFresh(store, symbol, spec.ttlMs)) {
+        publishStore(store, range);
+        Serial.printf("[kline] cache %s %s bars=%u age=%lu\n", symbol.c_str(), klineRangeLabel(range),
+                      (unsigned)s_viewCount, (unsigned long)storeAgeMs(store));
+        return s_viewCount;
+    }
+
+    if (!fetchKlineStore(symbol, spec, store)) {
+        if (store.symbol == symbol && store.count > 0) {
+            publishStore(store, range);
+            return s_viewCount;
+        }
+        s_viewCount = 0;
+        s_viewSymbol = symbol;
+        s_viewRange = range;
+        s_viewAtMs = 0;
+        return 0;
+    }
+
+    publishStore(store, range);
+    return s_viewCount;
 }
 
 const KlineBar *stockKlineBars()
 {
-    return s_klines;
+    return s_viewBars;
 }
 
 uint8_t stockKlineCount()
 {
-    return s_klineCount;
+    return s_viewCount;
 }
 
 String stockKlineSymbol()
 {
-    return s_klineSymbol;
+    return s_viewSymbol;
+}
+
+KlineRange stockKlineRange()
+{
+    return s_viewRange;
 }

@@ -32,6 +32,9 @@ static bool ensureTimeSprite()
     return s_timeSprOk;
 }
 
+/* 仅大号时钟文字：黑底霓虹绿 */
+static constexpr uint16_t CLOCK_TIME_COLOR = 0x07E0;
+
 static void pushTimeString(const String &timeStr)
 {
     const int wScr = M5.Display.width();
@@ -40,7 +43,7 @@ static void pushTimeString(const String &timeStr)
         s_timeSpr.setFont(&fonts::Font0);
         s_timeSpr.setTextSize(4);
         s_timeSpr.setTextDatum(middle_center);
-        s_timeSpr.setTextColor(TFT_WHITE);
+        s_timeSpr.setTextColor(CLOCK_TIME_COLOR);
         s_timeSpr.drawString(timeStr, s_timeSpr.width() / 2, s_timeSpr.height() / 2);
         s_timeSpr.pushSprite(0, TIME_TOP);
         return;
@@ -48,7 +51,7 @@ static void pushTimeString(const String &timeStr)
     /* 无 Sprite 时：定宽不透明覆写（HH:MM:SS 长度固定） */
     M5.Display.setFont(&fonts::Font0);
     M5.Display.setTextSize(4);
-    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    M5.Display.setTextColor(CLOCK_TIME_COLOR, TFT_BLACK);
     M5.Display.setTextDatum(middle_center);
     M5.Display.drawString(timeStr, wScr / 2, TIME_TOP + TIME_H / 2);
     M5.Display.setTextDatum(top_left);
@@ -75,7 +78,7 @@ void displayInit()
     M5.begin(cfg);
 
     M5.Display.setRotation(1);
-    M5.Display.setBrightness(180);
+    M5.Display.setBrightness(DISPLAY_BRIGHTNESS);
     M5.Display.fillScreen(TFT_BLACK);
     M5.Display.setTextWrap(false);
     uiMarkFullRedraw();
@@ -444,7 +447,7 @@ static void drawStockFooter()
     M5.Display.setFont(&fonts::efontCN_12);
     M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
     M5.Display.setCursor(4, M5.Display.height() - 14);
-    M5.Display.print("A切换 B视图 长按返回");
+    M5.Display.print("A换股 B周期 长按返回");
 }
 
 /* Yahoo 风格：交易所 · 名称(代码) · 价格 · 涨跌 */
@@ -508,7 +511,7 @@ static void drawKlineChart(int x, int y, int w, int h)
         M5.Display.setFont(&fonts::efontCN_12);
         M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
         M5.Display.setCursor(x + 8, y + h / 2 - 6);
-        M5.Display.print("暂无日K数据");
+        M5.Display.print("暂无K线数据");
         return;
     }
 
@@ -527,20 +530,25 @@ static void drawKlineChart(int x, int y, int w, int h)
     }
     float span = mx - mn;
 
-    int gap = 1;
-    int barW = (w - 4) / n;
+    int slot = (w - 4) / n;
+    if (slot < 1) {
+        slot = 1;
+    }
+    int barW = slot - 1;
     if (barW < 2) {
         barW = 2;
     }
-    if (barW > 6) {
-        barW = 6;
+    /* 根数少时加宽柱体，避免「只有几根细线」 */
+    int maxW = (n <= 12) ? 12 : ((n <= 24) ? 8 : 5);
+    if (barW > maxW) {
+        barW = maxW;
     }
 
     for (uint8_t i = 0; i < n; ++i) {
         const KlineBar &b = bars[i];
         bool up = b.close >= b.open;
         uint16_t col = up ? TFT_GREEN : TFT_RED;
-        int cx = x + 2 + (int)i * ((w - 4) / n) + ((w - 4) / n) / 2;
+        int cx = x + 2 + (int)i * slot + slot / 2;
         int yHigh = y + 2 + (int)((mx - b.high) / span * (h - 4));
         int yLow = y + 2 + (int)((mx - b.low) / span * (h - 4));
         int yO = y + 2 + (int)((mx - b.open) / span * (h - 4));
@@ -567,7 +575,6 @@ static void drawKlineChart(int x, int y, int w, int h)
             half = 1;
         }
         M5.Display.fillRect(cx - half, bodyTop, half * 2 + (barW % 2 ? 0 : 0), bodyH, col);
-        (void)gap;
     }
 
     /* 高低标注 */
@@ -583,14 +590,31 @@ static void drawKlineChart(int x, int y, int w, int h)
     M5.Display.print(buf);
 }
 
+KlineRange uiKlineRangeFromView(uint8_t view)
+{
+    switch (view) {
+    case STOCK_VIEW_K_TODAY:
+        return KRANGE_TODAY_5M;
+    case STOCK_VIEW_K_3D:
+        return KRANGE_DAY_3;
+    case STOCK_VIEW_K_7D:
+        return KRANGE_DAY_7;
+    case STOCK_VIEW_K_30D:
+        return KRANGE_DAY_30;
+    case STOCK_VIEW_K_FULL:
+        return KRANGE_DAY_FULL;
+    default:
+        return KRANGE_TODAY_5M;
+    }
+}
+
 bool uiEnsureStockKline(const UiNav &nav, const AppConfig &cfg)
 {
-    if (cfg.stockCount == 0) {
+    if (cfg.stockCount == 0 || !stockViewIsKline(nav.stockView)) {
         return false;
     }
     uint8_t idx = nav.stockIndex % cfg.stockCount;
-    /* 内部按 POLL_KLINE_MS 缓存，避免重复打东财/腾讯 */
-    return stockKlineRefresh(cfg.stocks[idx], false) > 0;
+    return stockKlineRefresh(cfg.stocks[idx], uiKlineRangeFromView(nav.stockView), false) > 0;
 }
 
 void uiRenderStockQuoteTick(const UiNav &nav, const AppConfig &cfg)
@@ -657,12 +681,13 @@ static void drawStock(const UiNav &nav, bool wifiOk, const AppConfig &cfg)
         return;
     }
 
-    /* 日 K */
+    /* K 线多周期：当日 / 3天 / 7天 / 30天 / 完整 */
     const int top = STATUS_H + 2;
+    KlineRange kr = uiKlineRangeFromView(nav.stockView);
     M5.Display.setFont(&fonts::efontCN_12);
     M5.Display.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
     M5.Display.setCursor(4, top);
-    M5.Display.print("日K");
+    M5.Display.print(klineRangeLabel(kr));
 
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.setCursor(4, top + 14);
@@ -697,19 +722,25 @@ static void drawSetting(bool wifiOk)
     if (wifiOk) {
         M5.Display.printf("STA %s", WiFi.localIP().toString().c_str());
     } else {
-        M5.Display.print("SoftAP mode");
+        M5.Display.print("未连 STA");
     }
     M5.Display.setCursor(4, STATUS_H + 44);
     M5.Display.printf("AP %s", AP_SSID);
     M5.Display.setCursor(4, STATUS_H + 60);
     M5.Display.printf("PW %s", AP_PASSWORD);
     M5.Display.setCursor(4, STATUS_H + 76);
-    M5.Display.printf("http://%s", WiFi.softAPIP().toString().c_str());
+    if (wifiIsApActive()) {
+        M5.Display.printf("http://%s", WiFi.softAPIP().toString().c_str());
+    } else if (wifiOk) {
+        M5.Display.printf("http://%s", WiFi.localIP().toString().c_str());
+    } else {
+        M5.Display.print("AP starting...");
+    }
 
     M5.Display.setFont(&fonts::efontCN_12);
     M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
     M5.Display.setCursor(4, STATUS_H + 96);
-    M5.Display.print("浏览器改WiFi/股票");
+    M5.Display.print(wifiIsApActive() ? "本页已开 SoftAP" : "用 STA 地址打开");
 
     M5.Display.setFont(&fonts::efontCN_12);
     M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);

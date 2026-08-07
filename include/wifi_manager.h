@@ -4,6 +4,9 @@
 
 void wifiInit();
 void wifiStartAp();
+void wifiStopAp();
+void wifiEnsureAp();
+bool wifiIsApActive();
 bool wifiConnectSta(const AppConfig &cfg, uint32_t timeoutMs = 15000);
 bool wifiIsStaConnected();
 int wifiScan(String *ssids, int8_t *rssi, int maxCount);

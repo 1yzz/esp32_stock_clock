@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "app_config.h"
+#include "services.h"
 
 enum UiScreen : uint8_t {
     SCREEN_MENU = 0,
@@ -12,10 +13,19 @@ enum UiScreen : uint8_t {
 };
 
 enum StockView : uint8_t {
-    STOCK_VIEW_QUOTE = 0, /* Yahoo 风格实时报价 */
-    STOCK_VIEW_KLINE,     /* 日 K 线 */
+    STOCK_VIEW_QUOTE = 0, /* 实时报价 */
+    STOCK_VIEW_K_TODAY,   /* 当日 5 分 K */
+    STOCK_VIEW_K_3D,      /* 3 天日 K */
+    STOCK_VIEW_K_7D,      /* 7 天日 K */
+    STOCK_VIEW_K_30D,     /* 30 天日 K */
+    STOCK_VIEW_K_FULL,    /* 完整日 K（屏幕可展示上限） */
     STOCK_VIEW_COUNT,
 };
+
+inline bool stockViewIsKline(uint8_t view)
+{
+    return view >= STOCK_VIEW_K_TODAY && view <= STOCK_VIEW_K_FULL;
+}
 
 enum ButtonEvent : uint8_t {
     BTN_NONE = 0,
@@ -47,4 +57,5 @@ void uiRenderClockMeta(bool wifiOk);
 /* 股票报价页局部刷新价格区 */
 void uiRenderStockQuoteTick(const UiNav &nav, const AppConfig &cfg);
 void uiMarkFullRedraw();
+KlineRange uiKlineRangeFromView(uint8_t stockView);
 bool uiEnsureStockKline(const UiNav &nav, const AppConfig &cfg);

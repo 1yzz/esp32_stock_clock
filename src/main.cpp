@@ -17,12 +17,17 @@ static bool g_timeOk = false;
 static void onWifiSaved(const AppConfig &cfg)
 {
     Serial.println("[app] WiFi saved, connecting STA...");
+    wifiEnsureAp();
     g_wifiOk = wifiConnectSta(cfg, 20000);
     if (g_wifiOk) {
         timeServiceInit();
         g_timeOk = timeServiceSynced();
         weatherRefresh();
         stockRefreshAll(g_cfg);
+        /* STA 正常后关 SoftAP，显著降功耗/发热；进「配置」页会再开 */
+        if (g_nav.screen != SCREEN_SETTING) {
+            wifiStopAp();
+        }
         uiMarkFullRedraw();
         uiRenderFull(g_nav, g_wifiOk, g_cfg);
         Serial.printf("[app] STA OK %s\n", WiFi.localIP().toString().c_str());
@@ -36,6 +41,10 @@ static void onWifiSaved(const AppConfig &cfg)
 void setup()
 {
     displayInit();
+#if defined(APP_CPU_MHZ)
+    setCpuFrequencyMhz(APP_CPU_MHZ);
+    Serial.printf("[app] CPU %u MHz\n", (unsigned)getCpuFrequencyMhz());
+#endif
     delay(100);
     Serial.println("\n=== M5StickS3 Stock Clock ===");
 
@@ -49,9 +58,11 @@ void setup()
 
     String apIp = WiFi.softAPIP().toString();
     Serial.printf("[app] SoftAP %s / %s -> http://%s\n", AP_SSID, AP_PASSWORD, apIp.c_str());
-    Serial.printf("[app] poll quote=%lus list=%lus weather=%lus kline=%lus\n",
+    Serial.printf("[app] poll quote=%lus list=%lus weather=%lus klineTTL today=%us mid=%us day=%us\n",
                   (unsigned long)(POLL_STOCK_QUOTE_MS / 1000UL), (unsigned long)(POLL_STOCK_LIST_MS / 1000UL),
-                  (unsigned long)(POLL_WEATHER_MS / 1000UL), (unsigned long)(POLL_KLINE_MS / 1000UL));
+                  (unsigned long)(POLL_WEATHER_MS / 1000UL), (unsigned)g_cfg.ttlKlineTodaySec,
+                  (unsigned)g_cfg.ttlKlineMidSec, (unsigned)g_cfg.ttlKlineDaySec);
+    Serial.printf("[app] brightness=%d idleDelay=%dms\n", DISPLAY_BRIGHTNESS, LOOP_IDLE_DELAY_MS);
 
     uiRenderFull(g_nav, false, g_cfg);
 
@@ -63,6 +74,7 @@ void setup()
             g_timeOk = timeServiceSynced();
             weatherRefresh();
             stockRefreshAll(g_cfg);
+            wifiStopAp(); /* 日常运行只用 STA */
             uiMarkFullRedraw();
             uiRenderFull(g_nav, g_wifiOk, g_cfg);
         } else {
@@ -80,6 +92,18 @@ void loop()
     static uint8_t lastStockCount = 0;
     static uint8_t lastStockIndex = 255;
     static uint8_t lastStockView = 255;
+    static UiScreen lastScreen = SCREEN_MENU;
+
+    /* 进配置页开 SoftAP；离开且已连 STA 则关掉以省电 */
+    if (g_nav.screen != lastScreen) {
+        if (g_nav.screen == SCREEN_SETTING) {
+            wifiEnsureAp();
+            uiMarkFullRedraw();
+        } else if (lastScreen == SCREEN_SETTING && wifiIsStaConnected()) {
+            wifiStopAp();
+        }
+        lastScreen = g_nav.screen;
+    }
 
     webServerLoop();
 
@@ -135,11 +159,11 @@ void loop()
     if (!g_wifiOk || httpIsBackingOff()) {
         if (dirty) {
             uiRenderFull(g_nav, g_wifiOk, g_cfg);
-        } else if (g_nav.screen == SCREEN_CLOCK && (millis() - lastClockTick > 200)) {
+        } else if (g_nav.screen == SCREEN_CLOCK && (millis() - lastClockTick > CLOCK_TICK_MS)) {
             uiRenderClockTick(g_wifiOk);
             lastClockTick = millis();
         }
-        delay(20);
+        delay(LOOP_IDLE_DELAY_MS);
         return;
     }
 
@@ -168,13 +192,19 @@ void loop()
             lastStockQuote = millis();
         }
 
-        /* K 线：换视图/换股或缓存过期才请求；有缓存则跳过 */
-        if (g_nav.stockView == STOCK_VIEW_KLINE) {
+        /* K 线：各周期独立缓存；换周期仅在对应桶过期时联网 */
+        if (stockViewIsKline(g_nav.stockView)) {
             const String &sym = g_cfg.stocks[idx];
-            bool needK = stockChanged || viewChanged || stockKlineCount() == 0 || stockKlineSymbol() != sym ||
-                         stockKlineAgeMs() >= POLL_KLINE_MS;
-            if (needK && uiEnsureStockKline(g_nav, g_cfg)) {
-                dirty = true;
+            KlineRange kr = uiKlineRangeFromView(g_nav.stockView);
+            bool needNet = stockKlineNeedsFetch(sym, kr);
+            bool needShow = stockChanged || viewChanged || stockKlineCount() == 0 ||
+                            stockKlineSymbol() != sym || stockKlineRange() != kr;
+            if (needShow || needNet) {
+                if (uiEnsureStockKline(g_nav, g_cfg)) {
+                    dirty = true;
+                } else if (needShow) {
+                    dirty = true; /* 展示空态 */
+                }
             }
         }
 
@@ -193,11 +223,11 @@ void loop()
         uiRenderFull(g_nav, g_wifiOk, g_cfg);
         lastClockTick = millis();
     } else if (g_nav.screen == SCREEN_CLOCK) {
-        if (millis() - lastClockTick > 200) {
+        if (millis() - lastClockTick > CLOCK_TICK_MS) {
             uiRenderClockTick(g_wifiOk);
             lastClockTick = millis();
         }
     }
 
-    delay(20);
+    delay(LOOP_IDLE_DELAY_MS);
 }

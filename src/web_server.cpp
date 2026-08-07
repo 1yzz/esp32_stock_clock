@@ -33,7 +33,7 @@ static String htmlEscape(const String &in)
 static void handleRoot()
 {
     String html;
-    html.reserve(4500);
+    html.reserve(6500);
     html += F(
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -100,6 +100,25 @@ static void handleRoot()
               "<form method='post' action='/stock/add'>"
               "<input name='symbol' placeholder='添加代码，如 s_usTSLA' maxlength='24' required>"
               "<button type='submit' class='primary'>添加股票</button>"
+              "</form></section>");
+
+    /* K 线 TTL */
+    html += F("<section><h3>K线缓存 TTL</h3>"
+              "<p class='meta'>单位：秒。到期前切换周期走本地缓存，不重复请求。</p>"
+              "<form method='post' action='/ttl'>"
+              "<label>当日5分（建议 30–120）</label>"
+              "<input name='ttl_today' type='number' min='15' max='3600' step='1' value='");
+    html += String(s_cfg->ttlKlineTodaySec);
+    html += F("'>"
+              "<label>3天30分 / 7天60分（建议 300–1800）</label>"
+              "<input name='ttl_mid' type='number' min='60' max='86400' step='1' value='");
+    html += String(s_cfg->ttlKlineMidSec);
+    html += F("'>"
+              "<label>30天K / 完整K（建议 600–3600）</label>"
+              "<input name='ttl_day' type='number' min='60' max='86400' step='1' value='");
+    html += String(s_cfg->ttlKlineDaySec);
+    html += F("'>"
+              "<button type='submit' class='primary'>保存 TTL</button>"
               "</form></section>");
 
     html += F(
@@ -210,6 +229,24 @@ static void handleStockDel()
     sendOkRedirect("已删除股票");
 }
 
+static void handleTtl()
+{
+    if (server.hasArg("ttl_today")) {
+        s_cfg->ttlKlineTodaySec = (uint32_t)server.arg("ttl_today").toInt();
+    }
+    if (server.hasArg("ttl_mid")) {
+        s_cfg->ttlKlineMidSec = (uint32_t)server.arg("ttl_mid").toInt();
+    }
+    if (server.hasArg("ttl_day")) {
+        s_cfg->ttlKlineDaySec = (uint32_t)server.arg("ttl_day").toInt();
+    }
+    if (!appConfigSave(*s_cfg)) {
+        sendOkRedirect("TTL 保存失败");
+        return;
+    }
+    sendOkRedirect("K线 TTL 已保存并生效");
+}
+
 void webServerBegin(AppConfig &cfg)
 {
     s_cfg = &cfg;
@@ -219,6 +256,7 @@ void webServerBegin(AppConfig &cfg)
     server.on("/wifi", HTTP_POST, handleWifi);
     server.on("/stock/add", HTTP_POST, handleStockAdd);
     server.on("/stock/del", HTTP_POST, handleStockDel);
+    server.on("/ttl", HTTP_POST, handleTtl);
     /* 兼容旧路径 */
     server.on("/config", HTTP_POST, handleWifi);
     server.begin();

@@ -1,0 +1,2 @@
+# 构建产物，勿提交大 bin（需要发布 Pages 时可去掉这行）
+firmware.bin

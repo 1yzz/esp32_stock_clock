@@ -1,0 +1,72 @@
+name: Deploy Web Flasher
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini', 'include/**', 'src/**') }}
+          restore-keys: |
+            pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install -U platformio
+
+      - name: Build & merge webflash
+        run: pio run -e m5sticks3 -t webflash
+
+      - name: Stamp version in manifest
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path("webflash/manifest.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          sha = os.environ.get("GITHUB_SHA", "dev")[:7]
+          data["version"] = sha
+          p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          print("manifest version:", data["version"])
+          PY
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: webflash
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>M5StickS3 Stock Clock — Web Flasher</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --card: #151c27;
+      --line: #2a3548;
+      --text: #e8eef8;
+      --muted: #93a1b8;
+      --accent: #7c5cff;
+      --accent2: #3d9cf0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, "Segoe UI", system-ui, sans-serif;
+      color: var(--text);
+      min-height: 100vh;
+      background:
+        radial-gradient(900px 420px at 15% -10%, #2a1f66 0%, transparent 55%),
+        radial-gradient(700px 380px at 90% 0%, #123a5c 0%, transparent 50%),
+        var(--bg);
+      padding: 28px 16px 56px;
+    }
+    main { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 1.7rem; margin: 0 0 8px; }
+    .lead { color: var(--muted); margin: 0 0 22px; line-height: 1.55; }
+    section {
+      background: color-mix(in srgb, var(--card) 92%, #000);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 14px;
+    }
+    h2 { font-size: 1.05rem; margin: 0 0 12px; }
+    ol, ul { margin: 0; padding-left: 1.2rem; color: var(--muted); line-height: 1.75; }
+    code {
+      background: #0c121c;
+      border: 1px solid #243044;
+      padding: 1px 6px;
+      border-radius: 5px;
+      font-size: 0.9em;
+      color: #c9d7ef;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-top: 14px;
+    }
+    esp-web-install-button {
+      --esp-tools-button-color: var(--accent);
+      --esp-tools-button-text-color: #fff;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 16px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #1c2636;
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .btn:hover { border-color: var(--accent2); }
+    .note { font-size: 0.9rem; color: var(--muted); margin-top: 12px; }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: #241f45;
+      color: #cbbdff;
+      font-size: 0.8rem;
+      margin-bottom: 10px;
+    }
+    a { color: var(--accent2); }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="pill">GitHub Pages · ESP Web Tools</div>
+    <h1>Stock Clock Web Flasher</h1>
+    <p class="lead">
+      在浏览器里给 <strong>M5StickS3</strong> 烧录 Stock Clock 固件（类似 Bruce Flasher）。
+      需要 Chrome / Edge，并允许串口权限。
+    </p>
+
+    <section>
+      <h2>1. 进下载模式</h2>
+      <ul>
+        <li>USB 连接电脑</li>
+        <li>若识别不到：关机后按住 <code>BtnA</code> 再插 USB</li>
+        <li>或短按侧边复位进入下载</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>2. 烧录到设备</h2>
+      <p class="note" style="margin-top:0">点击下方按钮 → 选择串口 → 等待完成并复位。</p>
+      <div class="actions">
+        <esp-web-install-button manifest="./manifest.json"></esp-web-install-button>
+        <a class="btn" href="./firmware.bin" download>DOWNLOAD FIRMWARE .BIN</a>
+      </div>
+      <p class="note">本页必须通过 HTTPS / localhost 打开；直接打开本地 HTML 文件通常无法连接串口。</p>
+    </section>
+
+    <section>
+      <h2>说明</h2>
+      <ul>
+        <li>固件由 GitHub Actions 从 <code>main</code> 自动构建并发布</li>
+        <li>合并镜像：bootloader + 分区表 + app，偏移 <code>0x0</code></li>
+        <li>源码：<a href="https://github.com/1yzz/esp32_stock_clock">github.com/1yzz/esp32_stock_clock</a></li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

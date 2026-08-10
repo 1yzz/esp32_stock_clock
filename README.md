@@ -31,6 +31,25 @@ pio device monitor
 
 烧录：长按侧边复位约 2 秒至绿灯闪；或关机后按住 **BtnA** 再插 USB。
 
+### 浏览器烧录（Web Serial / GitHub Pages）
+
+公开安装页（push 到 `main` 后由 Actions 自动更新）：
+
+**https://1yzz.github.io/esp32_stock_clock/**
+
+Chrome / Edge 打开 → 点 **Install** → 选串口。进不了下载模式时：关机后按住 **BtnA** 再插 USB。
+
+本地预览：
+
+```bash
+pio run -e m5sticks3 -t webflash
+npx --yes serve webflash
+```
+
+原理：[ESP Web Tools](https://esphome.github.io/esp-web-tools/) + `scripts/prepare_webflash.py` 合并镜像；工作流见 `.github/workflows/deploy-webflash.yml`。
+
+首次启用 Pages：仓库 **Settings → Pages → Source** 选 **GitHub Actions**，再跑一次 workflow（或 push / 手动 Run）。
+
 ## Controls
 
 | 场景 | A | B | 长按 |

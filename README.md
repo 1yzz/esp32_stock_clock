@@ -1,5 +1,11 @@
 # ESP32 Stock Clock (M5StickS3)
 
+[![Web Flasher](https://img.shields.io/badge/Web%20Flasher-Install-7c5cff?style=flat-square&logo=googlechrome&logoColor=white)](https://1yzz.github.io/esp32_stock_clock/)
+[![Deploy Web Flasher](https://img.shields.io/github/actions/workflow/status/1yzz/esp32_stock_clock/deploy-webflash.yml?branch=main&label=Pages%20Deploy&style=flat-square)](https://github.com/1yzz/esp32_stock_clock/actions/workflows/deploy-webflash.yml)
+[![GitHub stars](https://img.shields.io/github/stars/1yzz/esp32_stock_clock?style=flat-square)](https://github.com/1yzz/esp32_stock_clock/stargazers)
+[![Platform](https://img.shields.io/badge/Platform-ESP32--S3%20%7C%20M5StickS3-blue?style=flat-square&logo=espressif&logoColor=white)](https://docs.m5stack.com/en/core/M5StickS3)
+[![Framework](https://img.shields.io/badge/PlatformIO-Arduino-orange?style=flat-square&logo=platformio&logoColor=white)](https://platformio.org/)
+
 基于 **PlatformIO + Arduino + M5Unified** 的口袋行情时钟：大号时钟与天气、A 股/美股报价、多周期 K 线，以及 SoftAP 网页配置。
 
 ## Screenshots
